@@ -33,8 +33,8 @@ pip install torch==2.6.0 torchvision==0.21.0 xformers --index-url https://downlo
 ### 2. Clone this repo
 
 ```bash
-git clone https://github.com/<your-username>/Fast-FoundationStereo.git
-cd Fast-FoundationStereo
+git clone https://github.com/Vector-Wangel/Fast-FoundationStereoPose.git
+cd Fast-FoundationStereoPose
 ```
 
 ### 3. Install dependencies
