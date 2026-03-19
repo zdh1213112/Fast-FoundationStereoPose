@@ -13,6 +13,7 @@ Controls (focus on OpenCV window):
   - Left-click: Select foreground point → initialize tracking
   - r: Reset selection
   - p: Toggle IR projector
+  - v: Visualize current SAM2 segmented `points_3d` snapshot (blocking window)
   - q: Quit
 """
 
@@ -207,6 +208,21 @@ def create_camera_frustum(fx_, fy_, cx_, cy_, w, h, scale=0.15):
     ls.colors = o3d.utility.Vector3dVector(colors_ls)
     return ls
 
+
+def show_points3d_snapshot(points_3d, window_name="points_3d snapshot", color=None):
+    if points_3d.size == 0:
+        logging.info("No SAM2 segmented points_3d to visualize")
+        return
+    if color is None:
+        color = np.array([1.0, 1.0, 1.0], dtype=np.float64)
+    pcd_snapshot = o3d.geometry.PointCloud()
+    pcd_snapshot.points = o3d.utility.Vector3dVector(points_3d.astype(np.float64))
+    pcd_snapshot.colors = o3d.utility.Vector3dVector(
+        np.tile(color[None, :], (points_3d.shape[0], 1))
+    )
+    o3d.visualization.draw_geometries([pcd_snapshot], window_name=window_name)
+
+
 cam_frustum = create_camera_frustum(fx_ir, fy_ir, cx_ir, cy_ir, IMG_WIDTH, IMG_HEIGHT)
 vis.add_geometry(cam_frustum)
 coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1, origin=[0, 0, 0])
@@ -253,7 +269,8 @@ cv2.setMouseCallback("RGB + SAM2", mouse_callback)
 first_frame = True
 frame_count = 0
 
-logging.info("Drag/click to select target, r=reset, p=toggle IR projector, q=quit")
+logging.info("Right Open3D window shows SAM2 segmented points only")
+logging.info("Drag/click to select target, r=reset, p=toggle IR projector, v=snapshot, q=quit")
 
 # ===== 8. Main loop =====
 try:
@@ -366,6 +383,7 @@ try:
         y3d = -(v - cy_ir) * z / fy_ir  # Flip Y for visualization
         points_3d = np.stack([x3d, y3d, z], axis=-1)
 
+
         # RGB coloring: IR → RGB projection
         pts_ir = np.stack([(u - cx_ir) * z / fx_ir, (v - cy_ir) * z / fy_ir, z], axis=-1)
         pts_color = (R_ir_to_color @ pts_ir.T).T + T_ir_to_color
@@ -375,6 +393,7 @@ try:
 
         colors = np.zeros((len(z), 3), dtype=np.float64)
         colors[in_bounds] = color_bgr[v_rgb[in_bounds], u_rgb[in_bounds], ::-1].astype(np.float64) / 255.0
+        sam2_points_3d = np.zeros((0, 3), dtype=np.float64)
 
         # --- Point cloud highlight: Map SAM2 mask (RGB space) to IR space ---
         if current_mask is not None and np.any(current_mask):
@@ -383,9 +402,10 @@ try:
 
             if np.any(highlight):
                 colors[highlight] = colors[highlight] * 0.2 + MASK_COLOR_RGB * 0.8
+                sam2_points_3d = points_3d[highlight]
 
                 # --- 6D BBox: PCA + axis consistency + extent stabilization ---
-                obj_pts = points_3d[highlight]
+                obj_pts = sam2_points_3d
                 if len(obj_pts) >= 10:
                     centroid = obj_pts.mean(axis=0)
                     dists = np.linalg.norm(obj_pts - centroid, axis=1)
@@ -476,7 +496,7 @@ try:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         ir_status = "IR:ON" if ir_projector_enabled else "IR:OFF"
         if sam2_initialized:
-            status = f"TRACKING | {ir_status} | r=reset p=IR q=quit"
+            status = f"TRACKING | {ir_status} | r=reset p=IR v=snapshot q=quit"
             if obb_smooth_extent is not None:
                 ext = obb_smooth_extent
                 ext_alpha = max(EXTENT_ALPHA_MIN,
@@ -485,15 +505,21 @@ try:
                 cv2.putText(display, ext_str, (10, IMG_HEIGHT - 15),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         else:
-            status = f"Draw bbox / Click to select | {ir_status} | q=quit"
+            status = f"Draw bbox / Click to select | {ir_status} | v=snapshot q=quit"
         cv2.putText(display, status, (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         cv2.imshow("RGB + SAM2", display)
 
-        # Update Open3D
-        pcd.points = o3d.utility.Vector3dVector(points_3d.astype(np.float64))
-        pcd.colors = o3d.utility.Vector3dVector(colors)
+        # Update Open3D: show SAM2 segmented point cloud directly
+        if len(sam2_points_3d) > 0:
+            pcd.points = o3d.utility.Vector3dVector(sam2_points_3d.astype(np.float64))
+            pcd.colors = o3d.utility.Vector3dVector(
+                np.tile(MASK_COLOR_RGB[None, :], (len(sam2_points_3d), 1))
+            )
+        else:
+            pcd.points = o3d.utility.Vector3dVector(np.zeros((0, 3), dtype=np.float64))
+            pcd.colors = o3d.utility.Vector3dVector(np.zeros((0, 3), dtype=np.float64))
 
         if first_frame:
             vis.reset_view_point(True)
@@ -509,7 +535,9 @@ try:
 
         frame_count += 1
         if frame_count % 30 == 0:
-            logging.info(f"Frame {frame_count}, FPS: {fps:.1f}, points: {len(points_3d)}")
+            logging.info(
+                f"Frame {frame_count}, FPS: {fps:.1f}, points_all: {len(points_3d)}, points_sam2: {len(sam2_points_3d)}"
+            )
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
@@ -522,6 +550,12 @@ try:
             if depth_sensor.supports(rs.option.emitter_enabled):
                 depth_sensor.set_option(rs.option.emitter_enabled, 1 if ir_projector_enabled else 0)
             logging.info(f"IR projector: {'ON' if ir_projector_enabled else 'OFF'}")
+        elif key == ord('v'):
+            show_points3d_snapshot(
+                sam2_points_3d,
+                window_name="SAM2 segmented points_3d snapshot",
+                color=MASK_COLOR_RGB
+            )
 
 except KeyboardInterrupt:
     pass
