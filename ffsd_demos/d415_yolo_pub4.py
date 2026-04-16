@@ -430,10 +430,15 @@ def mouse_callback(event, x, y, flags, param):
 cv2.setMouseCallback("RGB + SAM2", mouse_callback)
 first_frame = True
 frame_count = 0
+seg_points_3d = np.zeros((0, 3), dtype=np.float64)
+seg_colors_rgb = np.zeros((0, 3), dtype=np.float64)
+logging.info("Controls: r=reset, a=save segmented cloud, p=toggle IR projector, q=quit")
 
 try:
     while True:
         t0 = time.time()
+        seg_points_3d = np.zeros((0, 3), dtype=np.float64)
+        seg_colors_rgb = np.zeros((0, 3), dtype=np.float64)
         
         #  新增：处理 ROS 2 回调和后台任务
         rclpy.spin_once(ros_node, timeout_sec=0)
@@ -543,12 +548,16 @@ try:
 
         colors = np.zeros((len(z), 3), dtype=np.float64)
         colors[in_bounds] = color_bgr[v_rgb[in_bounds], u_rgb[in_bounds], ::-1].astype(np.float64) / 255.0
+        colors_raw = colors.copy()  # 保存原始RGB颜色，用于导出分割点云
 
         if current_mask is not None and np.any(current_mask):
             highlight = np.zeros(len(z), dtype=bool)
             highlight[in_bounds] = current_mask[v_rgb[in_bounds], u_rgb[in_bounds]] > 0
 
             if np.any(highlight):
+                # 在高亮显示前缓存 SAM2 分割点云（保持原始颜色）
+                seg_points_3d = points_3d[highlight].astype(np.float64)
+                seg_colors_rgb = colors_raw[highlight].astype(np.float64)
                 colors[highlight] = colors[highlight] * 0.2 + MASK_COLOR_RGB * 0.8
                 obj_pts = points_3d[highlight]
                 if len(obj_pts) >= 10:
@@ -652,7 +661,16 @@ try:
         if sam2_initialized:
             if obb_smooth_extent is not None:
                 cv2.putText(display, f"BBox: {obb_smooth_extent[0]*100:.1f}x{obb_smooth_extent[1]*100:.1f}x{obb_smooth_extent[2]*100:.1f}cm", (10, IMG_HEIGHT - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        cv2.putText(display, f"TRACKING | {ir_status} | r=reset p=IR q=quit" if sam2_initialized else f"Draw bbox / Click to select | {ir_status} | q=quit", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        cv2.putText(
+            display,
+            f"TRACKING | {ir_status} | r=reset a=save_seg p=IR q=quit" if sam2_initialized
+            else f"Draw bbox / Click to select | {ir_status} | a=save_seg q=quit",
+            (10, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 255, 0),
+            2,
+        )
         cv2.imshow("RGB + SAM2", display)
 
         pcd.points = o3d.utility.Vector3dVector(points_3d.astype(np.float64))
@@ -675,6 +693,20 @@ try:
         elif key == ord('r'):
             print('用户按下R，重新检测') 
             need_reset = True
+        elif key == ord('a'):
+            script_dir = os.path.dirname(os.path.realpath(__file__))
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            save_path = os.path.join(script_dir, f"d415_segmented_cloud_{timestamp}.ply")
+            if len(seg_points_3d) > 0:
+                seg_pcd = o3d.geometry.PointCloud()
+                seg_pcd.points = o3d.utility.Vector3dVector(seg_points_3d)
+                seg_pcd.colors = o3d.utility.Vector3dVector(seg_colors_rgb)
+                if o3d.io.write_point_cloud(save_path, seg_pcd):
+                    logging.info(f"Saved segmented point cloud: {save_path}")
+                else:
+                    logging.warning("Failed to save segmented point cloud (write error)")
+            else:
+                logging.warning("No segmented points in current frame")
         elif key == ord('p'):
             ir_projector_enabled = not ir_projector_enabled
             print(f"IR 投影仪: {'ON' if ir_projector_enabled else 'OFF'}")
